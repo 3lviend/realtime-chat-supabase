@@ -3,22 +3,28 @@ import { supabase } from '../lib/supabase';
 
 export function useAuth() {
   const [user, setUser] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const session = (supabase as any).auth?.session?.();
-    setUser(session?.user ?? null);
-
-    const listener = (supabase as any).auth?.onAuthStateChange?.((_event: any, session: any) => {
+    // Get initial session asynchronously
+    supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    // Listen for auth changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setLoading(false);
     });
 
     return () => {
-      if (listener && typeof listener.unsubscribe === 'function') {
-        listener.unsubscribe();
-      }
+      subscription.unsubscribe();
     };
   }, []);
 
-  return { user };
+  return { user, loading };
 }
 
