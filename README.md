@@ -1,73 +1,109 @@
-# React + TypeScript + Vite
+## Realtime Chat — Supabase
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Short summary: a minimal realtime chat app that uses Supabase for Auth and Realtime (database changes). This README focuses on what to prepare in Supabase and how to integrate it with the app — UI details are intentionally minimal.
 
-Currently, two official plugins are available:
+### What to prepare in Supabase
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+1. Create a new project at https://app.supabase.com and note:
+   - `SUPABASE_URL` (Project URL)
+   - `SUPABASE_ANON_KEY` (Anon/public key)
+   - (Optional, for server) `SUPABASE_SERVICE_ROLE_KEY` — do NOT use this in client code
 
-## React Compiler
+2. Auth
+   - Enable Email/Password authentication in your Supabase project (Authentication → Providers → Email).
+   - The app uses email/password sign-up and sign-in only.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+3. Database — `messages` table (example)
+  - The committed Supabase migration defines the `messages` table and related database objects. The schema in the migration includes:
+    - `id` uuid primary key (default: `gen_random_uuid()`)
+    - `user_id` uuid NOT NULL (foreign key to `auth.users`)
+    - `content` text NOT NULL
+    - `created_at` timestamptz DEFAULT `now()`
+  - The migration also creates a trigger function `set_messages_user_id()` which fills `user_id` with `auth.uid()` when missing, and a trigger that calls it before insert.
 
-## Expanding the ESLint configuration
+  Example (excerpt from the committed migration):
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+```sql
+create extension if not exists "pgcrypto";
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+create or replace function public.set_messages_user_id() returns trigger
+  language plpgsql security definer
+as $$
+begin
+  if new.user_id is null then
+    new.user_id := auth.uid();
+  end if;
+  return new;
+end;
+$$;
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+create table public.messages (
+  id uuid default gen_random_uuid() not null,
+  user_id uuid not null,
+  content text not null,
+  created_at timestamptz default now()
+);
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+alter table only public.messages
+  add constraint messages_pkey primary key (id);
+
+create or replace trigger set_messages_user_id_trg
+  before insert on public.messages
+  for each row execute function public.set_messages_user_id();
+
+alter table only public.messages
+  add constraint messages_user_id_fkey foreign key (user_id) references auth.users(id);
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+4. Row Level Security (RLS) & Policies
+   - Enable RLS on the `messages` table and add policies so authenticated users can read all messages and insert their own:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+```sql
+-- enable RLS
+alter table public.messages enable row level security;
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+-- allow authenticated users to see all messages
+create policy "Authenticated user can see all messages" on public.messages
+  for select to authenticated using (true);
+
+-- allow users to insert their own messages (user_id must match auth.uid())
+create policy "User can insert message" on public.messages
+  for insert with check ((select auth.uid()) = user_id);
 ```
+
+5. Realtime
+   - The migration adds the `messages` table to the `supabase_realtime` publication, enabling realtime subscriptions.
+   - Ensure Realtime is enabled in your Supabase project settings (Project → Realtime or Database settings in the Supabase UI).
+
+6. Migrations (recommended)
+   - Use the Supabase CLI to save migration SQL so the schema can be reproduced across environments.
+   - Example: `supabase migration new create_messages_table` and add the SQL above.
+  - Note: this repository already includes a Supabase-generated migration at `supabase/migrations/20260217082108_remote_schema.sql`.
+    The file was originally generated by the Supabase CLI and committed here for reproducibility.
+
+### Integrating with the app (concise)
+
+- Environment variables (example `.env.example`):
+
+```env
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=public-anon-key
+```
+
+  - Note: In Vite/React use the `VITE_` prefix so variables are available in the client. Do not commit sensitive keys.
+
+- Auth & Session
+  - Use `supabase.auth` for sign-in/sign-out and track the session on the client.
+
+- Realtime events
+  - For realtime chat, subscribe to changes on `messages`:
+    - e.g. `supabase.from('messages').on('INSERT', payload => ...)` or use live queries per the SDK.
+
+### Quick integration checklist
+
+- Create Supabase project and keep `URL` and `Anon Key` handy.
+- Create the `messages` table, enable RLS, and add basic policies.
+- Enable Realtime for the table.
+- Add env vars to your `.env`/hosting settings and initialize `@supabase/supabase-js`.
+
+If you want, I can add a migration file example, a stricter policy (e.g. only message owners can delete), or deployment-specific env instructions. I intentionally kept UI details minimal so this README stays focused on Supabase integration.
